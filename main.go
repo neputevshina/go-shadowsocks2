@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -27,8 +29,8 @@ var config struct {
 func main() {
 
 	var flags struct {
-		Client     string
-		Server     string
+		Client     *string
+		Server     *string
 		Cipher     string
 		Key        string
 		Password   string
@@ -45,13 +47,14 @@ func main() {
 		PluginOpts string
 	}
 
+	flags.Server = flag.String("s", "0.0.0.0", "server listen address")
+	flags.Client = flag.String("c", "", "client connect url")
+
 	flag.BoolVar(&config.Verbose, "verbose", false, "verbose mode")
 	flag.StringVar(&flags.Cipher, "cipher", "AEAD_CHACHA20_POLY1305", "available ciphers: "+strings.Join(core.ListCipher(), " "))
 	flag.StringVar(&flags.Key, "key", "", "base64url-encoded key (derive from password if empty)")
 	flag.IntVar(&flags.Keygen, "keygen", 0, "generate a base64url-encoded random key of given length in byte")
 	flag.StringVar(&flags.Password, "password", "", "password")
-	flag.StringVar(&flags.Server, "s", "", "server listen address or url")
-	flag.StringVar(&flags.Client, "c", "", "client connect address or url")
 	flag.StringVar(&flags.Socks, "socks", "", "(client-only) SOCKS listen address")
 	flag.BoolVar(&flags.UDPSocks, "u", false, "(client-only) Enable UDP support for SOCKS")
 	flag.StringVar(&flags.RedirTCP, "redir", "", "(client-only) redirect TCP from this address")
@@ -73,7 +76,7 @@ func main() {
 		return
 	}
 
-	if flags.Client == "" && flags.Server == "" {
+	if flags.Client == nil && flags.Server == nil {
 		flag.Usage()
 		return
 	}
@@ -87,18 +90,10 @@ func main() {
 		key = k
 	}
 
-	if flags.Client != "" { // client mode
-		addr := flags.Client
-		cipher := flags.Cipher
-		password := flags.Password
+	if flags.Client != nil { // client mode
 		var err error
 
-		if strings.HasPrefix(addr, "ss://") {
-			addr, cipher, password, err = parseURL(addr)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
+		addr, cipher, password := parseURL(*flags.Client)
 
 		udpAddr := addr
 
@@ -130,6 +125,7 @@ func main() {
 
 		if flags.Socks != "" {
 			socks.UDPEnabled = flags.UDPSocks
+			println(addr)
 			go socksLocal(flags.Socks, addr, ciph.StreamConn)
 			if flags.UDPSocks {
 				go udpSocksLocal(flags.Socks, udpAddr, ciph.PacketConn)
@@ -145,18 +141,11 @@ func main() {
 		}
 	}
 
-	if flags.Server != "" { // server mode
-		addr := flags.Server
+	if flags.Server != nil { // server mode
+		addr := *flags.Server
 		cipher := flags.Cipher
 		password := flags.Password
 		var err error
-
-		if strings.HasPrefix(addr, "ss://") {
-			addr, cipher, password, err = parseURL(addr)
-			if err != nil {
-				log.Fatal(err)
-			}
-		}
 
 		udpAddr := addr
 
@@ -186,16 +175,83 @@ func main() {
 	killPlugin()
 }
 
-func parseURL(s string) (addr, cipher, password string, err error) {
-	u, err := url.Parse(s)
-	if err != nil {
+var formats = `	Supported formats:
+	- ss://<cipher>:<password>@<server ip>:<port>[/<anything>]
+	- ss://<base-64 encoded cipher and password>@<server ip>:<port>[/<anything>] (Outline)
+	- ss://<base-64 encoded connection data>[#<optional tag>]`
+
+//var plainRegexp = regexp.MustCompile(`ss://([A-Z_0-9]+):(.+)@(.+:[0-9]{1,6})`)
+
+func parseURL(s string) (addr, cipher, password string) {
+	fail := false
+	addr, cipher, password = parseurl(s)
+	if cipher == "" {
+		log.Println("must provide cipher")
+		fail = true
+	}
+	if password == "" {
+		log.Println("must provide password")
+		fail = true
+	}
+	if addr == "" {
+		log.Println("must provide server address and port")
+		fail = true
+	}
+	if fail {
+		os.Exit(1)
+	}
+	return
+}
+
+var base64Regexp = regexp.MustCompile(`ss://([A-Za-z_0-9-]+)(#(.+))?$`)
+var base64DecodedRegexp = regexp.MustCompile(`(.+):(.+)@(.+:[0-9]{1,6})`)
+var outlineRegexp = regexp.MustCompile(`ss://([A-Za-z_0-9-]+)@(.+:[0-9]{1,6})`)
+
+func parseurl(s string) (addr, cipher, password string) {
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(`can't recognize passed url`)
+			fmt.Println(formats)
+			panic(err)
+		}
+	}()
+
+	if ss := base64Regexp.FindStringSubmatch(s); base64Regexp.MatchString(s) {
+		dat, err := base64.RawURLEncoding.DecodeString(ss[1])
+		if err != nil {
+			panic(dat)
+		}
+		// Shadowsocks config “specification” gives an example of a password containing
+		// a slash, a semicolon and an '@'.
+		// Let's suppose that someone actually generated a password containing
+		// those characters and not try to parse it as an URL.
+		so := base64DecodedRegexp.FindSubmatch(dat)
+		if so == nil {
+			panic("")
+		}
+		cipher = string(so[1])
+		password = string(so[2])
+		addr = string(ss[2])
+		return
+	} else if ss := outlineRegexp.FindStringSubmatch(s); outlineRegexp.MatchString(s) {
+		dat, err := base64.RawURLEncoding.DecodeString(ss[1])
+		if err != nil {
+			panic("")
+		}
+		bs := bytes.Split(dat, []byte{':'})
+		cipher = string(bs[0])
+		password = string(bs[1])
+		addr = string(ss[2])
 		return
 	}
 
-	addr = u.Host
-	if u.User != nil {
-		cipher = u.User.Username()
-		password, _ = u.User.Password()
+	u, err := url.Parse(s)
+	if err != nil {
+		panic("")
 	}
-	return
+	if u.User == nil {
+		return u.Host, "", ""
+	}
+	passw, _ := u.User.Password()
+	return u.Host, u.User.Username(), passw
 }
