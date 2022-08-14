@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shadowsocks/go-shadowsocks2/socks"
+	"github.com/neputevshina/go-shadowsocks2/socks"
 )
 
 type mode int
