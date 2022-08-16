@@ -38,5 +38,7 @@ func main() {
 	flag.DurationVar(&config.UDPTimeout, "udptimeout", 5*time.Minute, "UDP tunnel timeout")
 	flag.Parse()
 
+	log.Default().SetFlags(log.Llongfile | log.LstdFlags)
+
 	shadowsocks.Main(flags, config, log.Default())
 }
